@@ -1,0 +1,1649 @@
+---
+title: "Potential propagation of agricultural pesticide exposure and effects to upstream sections in a biosphere reserve"
+author: "Schneeweiss A., Schreiner V.C., Reemtsma T., Liess M., Schaefer R.B."
+date: "12 April 2022"
+output:
+  html_document:
+    figure_caption: yes
+    highlight: tango
+    number_sections: no 
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+R script written by Anke Schneeweiss
+
+Internally reviewed by Dr. Verena C. Schreiner
+
+University of Koblenz-Landau  
+Fortstrasse 7  
+76829 Landau  
+GERMANY  
+Corresponding mail adress: schneeweiss'@'uni-landau.de
+
+```{r, message=FALSE, warning=FALSE}
+#Required packages
+require(plyr) # Data wrangling
+require(dplyr) # Data wrangling
+require(tidyr) # Data wrangling
+require(stringr)
+require(data.table) # Data wrangling
+require(reshape)
+require(RPostgreSQL) # Data base
+require(ggplot2) # plots
+require(vegan) # RDA
+require(standartox) # effect values
+require(EnvStats)
+require(ggpubr)# for ggarrange
+require(scales)
+require(gridExtra)
+require(ggpmisc)#for lm in ggplot
+require(reactable) #for nice tables
+require(kableExtra) #for nice tables
+require(qwraps2)
+require(doBy) # for summaryby
+require(knitr)#for nice knit tables
+require(tidyselect)
+require(janitor)
+require(lme4)#for mixed models
+require(beanplot)
+require(lmerTest) #for lmm tests
+require(car)#for anova
+require(performance)#for model diagnosis
+require(sjPlot)#for model diagnosis
+require(DHARMa)#for model diagnosis
+require(multcomp)#for model diagnosis
+require(emmeans)#for model diagnosis
+require(DAAG) # for model diagnosis qreference()
+require(effects) #for extracting and plotting effects from LMM
+sessionInfo()
+citation("lme4")
+citation("lmerTest")
+citation("emmeans")
+citation("ggplot2")
+citation("effects")
+citation("sjPlot")
+```
+
+```{r, message=FALSE, warning=FALSE}
+#########Set the working directory ##########
+#Set your own project path (you need to replace this line)
+path <-getwd() 
+setwd(path)
+```
+
+# 0. Some general definitions
+
+We define a fixed color scheme for the site types.
+```{r}
+#group color scheme for site_types in all plots
+group.color <- c("agriculture"= "peru", "edge" ="darkkhaki","refuge" = "darkgreen")
+```
+
+We define our own rounding function. Because the normal rounding function rounds 0.5 to 0. Now, our function rounds 0.5 up to 1.
+```{r}
+round2 <- function(x, digits = 0) {  
+  posneg <- sign(x)
+  z <- abs(x) * 10^digits
+  z <- z + 0.5
+  z <- trunc(z)
+  z <- z / 10^digits
+  z * posneg
+}
+```
+
+# 1. Hypothesis 1: Extimating pesticide toxicity in refuge, edge and agriculture.
+Assessing hypothesis 1 (see manuscript):	"Given that refuges mainly drain forested areas without pesticide use, we hypothesised the absence of pesticide exposure at edges and refuges, whereas we hypothesised high pesticide exposure in the downstream agricultural sites. "
+
+## 1.1 Load and prepare data
+### 1.1.1 Pesticide data
+
+```{r}
+psm_conc_RP_2019_raw <- read.csv(file="20220412_rawdata_1_pesticide_data.csv",header=TRUE, sep=",", na.strings =c("na","NA",""),stringsAsFactors = FALSE) 
+psm_conc_RP_2019_raw<-as.data.table(psm_conc_RP_2019_raw) #this table includes all 74 substances analysed (detected and non-detected, Spinosad d and a summed up, hence finally only 73 compounds shown)
+length(unique(psm_conc_RP_2019_raw$substance_name))#73
+```
+
+```{r}
+# prepare a data frame where all non-detects are removed
+psm_conc_RP_2019 <- psm_conc_RP_2019_raw[!psm_conc_RP_2019_raw$concentration_ug_L == "0", ]
+length(unique(psm_conc_RP_2019$substance_name))#57
+```
+
+Analysed substances = 74 (here only 73 listed as Spinosad d and a have been analysed separately, but summed up for data analysis)
+Detected substances = 57
+
+### 1.1.2 Effect data (from Standardtox for most sensitive invertebrate) 
+Version: standartox_0.0.1 retrieved on the 13.12.2021
+```{r}
+#search effect data for the 57 substances
+length(unique(psm_conc_RP_2019$CAS))
+# search for effect data using Standartox 
+run = FALSE#FALSE # set to TRUE for the first run, otherwise set FALSE, to avoid multiple runs
+if (run) {
+  query_st <- stx_query(cas = unique(psm_conc_RP_2019$CAS),  
+                      endpoint = 'XX50',
+                      duration = c(24, 96), #acute exposure, cut off at 96h
+                      habitat = "freshwater", #avoid marine species --> different sensitivity
+                      ecotox_grp = "Invertebrate",  # we concentrate on invertebrates
+                      concentration_type = "active ingredient", # formulation conc are not as exact as active ingredient conc
+                      concentration_unit = c("ug/l", "ppb"), # Standardtox automatically changes the units to ppb
+                      exposure = c("environmental", "aquatic")) #since water is the animals environment
+  saveRDS(query_st, file.path(path, '20220412_rawdata_2_XX50_standardtox.rds'))
+
+} else {
+  query_st = readRDS(file.path(path, '20220412_rawdata_2_XX50_standardtox.rds'))
+}
+# select the filtered data
+query_st_fil <- as.data.frame(query_st$filtered)
+```
+
+```{r}
+#remove tests which were identified as an outlier
+query_st_wo_out <- query_st_fil[query_st_fil$outlier == FALSE,]
+```
+
+```{r}
+#remove taxa wrongly added to freshwater
+query_st_tax <- query_st_wo_out[!query_st_wo_out$tax_taxon == "Mytilus edulis",]
+query_st_tax <- query_st_tax[!query_st_tax$tax_taxon == "Cnaphalocrocis medinalis",]
+#control
+str_sort(unique(query_st_tax$tax_taxon))
+```
+
+```{r}
+#calculate geom_mean per taxon / chemical combination,
+query_st_geom <- ddply(query_st_tax, c("cname", "cas", "tax_taxon"),summarise, EC50 = geoMean(concentration))
+```
+
+```{r}
+# select most sensitive taxon per compound 
+query_st_geom <- as.data.table(query_st_geom)
+query_EC50 <- query_st_geom[query_st_geom[ , .I[EC50 == min(EC50)], by = c("cname", "cas")]$V1]
+#rename
+EC50_iv<-query_EC50
+```
+
+```{r}
+#substitute "-" with "" in cas, and change to numeric, mandatory for later join
+EC50_iv$CAS <- gsub("-", "", EC50_iv$cas)
+EC50_iv$CAS<- as.numeric(EC50_iv$CAS)
+# Remove several columns that are not of interest here
+EC50_iv<- dplyr::select(EC50_iv,-c("cas"))
+#rename column names for later merging/binding
+names(EC50_iv)[names(EC50_iv)=="EC50"]<- "EC50_ug_L"
+#add reference information
+EC50_iv$reference<-"standardtox"
+```
+
+```{r}
+#load table with missing EC_50
+df_missing  <- read.csv(file="20220412_rawdata_3_XX50_ppbd.csv",header=TRUE, sep=";",na.strings =c("na","NA",""),stringsAsFactors = FALSE,check.names = FALSE)
+# Remove several columns that are not of interest here
+df_missing<- dplyr::select(df_missing,-c("sign")) # MASS package is masking select function from dplyr
+```
+
+```{r}
+#add missing EC50s to the former standardtox list
+EC50_iv_complete<- rbind(setDT(EC50_iv), setDT(df_missing),fill=TRUE)
+```
+
+```{r}
+# Merge EC_50 information to psm_conc, use CAS number
+tox_iv_0 <- dplyr:: left_join(psm_conc_RP_2019, EC50_iv_complete, by="CAS")
+#control
+setdiff(psm_conc_RP_2019$CAS , EC50_iv_complete$CAS)
+setdiff(psm_conc_RP_2019$CAS , tox_iv_0$CAS)
+# Remove several columns that are not of interest here
+tox_iv<- dplyr::select(tox_iv_0,-c("cname"))
+```
+
+## 1.2 sumTU
+### 1.2.1 Calculation
+a) Calculation of toxic unit (TU) per substance
+```{r}
+#Calculate pesticide_concentration/effect_data
+tox_iv$tox_iv_fac <- with(tox_iv, concentration_ug_L/EC50_ug_L)
+#Calculate TU for each compound (TU_i)
+tox_iv$TU_iv <- with(tox_iv, log10(tox_iv_fac))
+```
+
+b) Calculation sumTU per site_type
+```{r}
+#Calculate sumTU
+sumTU_iv_RP_2019 <- ddply(tox_iv, c("uniqueID"), summarise, sumTU_iv = log10(sum(tox_iv_fac)))
+# save results,
+#write.csv(sumTU_iv_RP_2019, "sumTU_iv_RP_2019.csv", row.names = FALSE)
+```
+
+```{r}
+#filter for the june sample
+sumTU <-separate(data = sumTU_iv_RP_2019 ,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+sumTU_1 <- sumTU[sumTU$date_pesticide_sampling == "20190611"|sumTU$date_pesticide_sampling == "20190612",] 
+```
+
+### 1.2.2 Statistics
+```{r}
+#statistics for the following data frame
+df_statistics<-sumTU_1
+#change variables to factor
+df_statistics$site_type  	<- factor(df_statistics$site_type) 
+df_statistics$stream  	<- factor(df_statistics$stream)
+```
+
+a) Data exploration
+```{r}
+#outlier
+outlier_values <- boxplot.stats(df_statistics$sumTU_iv)$out  # outlier values.
+boxplot(df_statistics$sumTU_iv, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(sumTU_iv~site_type, data=df_statistics)
+leveneTest(sumTU_iv~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$sumTU_iv)
+shapiro.test(df_statistics$sumTU_iv)
+```
+Data are reasonably normally distributed, variances homogeneous and there are no problematic outliers.
+
+b) Model
+
+To compare pesticide toxicity across the three site types (refuge, edge, agriculture), we modeled sumTU as response variable explained by site type. Given that sites within a stream are likely more similar than between streams, we accounted for the nested structure of the data using linear mixed models (LMM) with stream as random factor.
+```{r}
+#linear mixed model
+lmm_TUsum <- lmer(sumTU_iv ~ site_type + (1|stream), data = df_statistics,REML = T)
+lmm<-lmm_TUsum
+# problem singular fit --> probably because the random factor stream does have to few levels to describe the variance, thus the random factor stream is shrinked to zero, but this can be ignored as long as the model converges --> other solution would be to drop the random factor or to treat it as fixed, this would be a simple linear model so
+```
+
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)#fine
+check_homogeneity(lmm) #fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))#fine
+check_normality(lmm) #fine
+#Cook's distance values
+plot(cooks.distance(lmm),ylab="Cook distance values")
+#general model check
+check_singularity(lmm) #true, see comment for model above
+check_convergence(lmm) #fine
+```
+Model is validated.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+model_performance(lmm) 
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is significant, no predictor can be droped
+#posthoc - more conservative --> used for main manuscript
+emmeans(lmm, list(pairwise ~ site_type), adjust = "tukey")
+```
+Conclusion: Hypothesis 1 matches with our results. The level of toxicity was significantly higher in agricultural sites compared with edge and refuge sites (LMM, p=0.015, Table SI 9,10; pairwise differences of site type: agriculture - refuge: p = 0.03, agriculture - edge: p = 0.02, edge - refuge: p = 0.95).
+
+### 1.2.3 Figure 2C - sumTU
+```{r}
+#plot TU sum per site_type
+fig_2_C <- 
+    ggplot(sumTU_1, aes(x = factor(site_type,level=c("refuge","edge","agriculture")) , y = sumTU_iv,fill=site_type)) + 
+    geom_hline(yintercept=-3, linetype="dashed", color = "red",size=0.6)+
+  geom_hline(yintercept=-4, linetype="dashed", color = "orange",size=0.6)+
+      geom_violin(trim = FALSE, alpha=0.1)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+  stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = "sumTU") +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+        scale_y_continuous(breaks = c(-10,-8,-6,-4,-2,0,2), limits = c(-10.5,2), labels=function(n){format(n, scientific = FALSE)}) +
+     scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     scale_x_discrete(name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        legend.position="none",
+        panel.background = element_blank(),
+         plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_2_C
+```
+
+
+### 1.2.4 Table_SI_4 (summary statistics based on June sampling including non-detects)
+```{r}
+#calculate summary statistics of pesticide concentrations
+#filter for the June sample
+psm_conc_RP_2019_raw_june <- psm_conc_RP_2019_raw[psm_conc_RP_2019_raw$date_pesticide_sampling == "20190611"|psm_conc_RP_2019_raw$date_pesticide_sampling == "20190612",] 
+str(psm_conc_RP_2019_raw_june)
+df_summary_pest<-summaryBy(concentration_ug_L ~ substance_name+CAS+site_type+pesticide_type, data = psm_conc_RP_2019_raw_june,
+   FUN = function(x) { c(min=min(x),max=max(x))} )
+#from wide to long
+df_summary_pest_long<-gather(df_summary_pest,stat,value,5:6)
+df_summary_pest_long<-reshape2::dcast(df_summary_pest_long,substance_name+CAS+pesticide_type~stat+site_type)
+#calculate summary statistics of TUi
+#filter for the June sample
+tox_iv_june <- tox_iv[tox_iv$date_pesticide_sampling == "20190611"|tox_iv$date_pesticide_sampling == "20190612",] 
+df_summary_tox<-summaryBy(TU_iv ~ CAS+site_type, data = tox_iv_june,
+   FUN = function(x) { c(max=max(x))} )
+df_summary_tox$stat<-"MaxTU"
+df_summary_tox<-reshape2::dcast(df_summary_tox,CAS~stat+site_type,value.var = "TU_iv.max")
+#join pesticide and tox data
+Table_SI_4<- dplyr:: full_join(df_summary_pest_long,df_summary_tox, by="CAS")
+#join with effect data
+Table_SI_4<- dplyr:: full_join(EC50_iv_complete,Table_SI_4, by="CAS")
+str(Table_SI_4)
+#order columns new, first June, then rest
+Table_SI_4_1<- Table_SI_4[, c(6,4,7,11:13,8:10,3,2,5,14:16)]
+Table_SI_4_1[,13:15]<-round2(Table_SI_4_1[,13:15],digits = 2)
+Table_SI_4_1[,10]<-round2(Table_SI_4_1[,10],digits = 4)
+names(Table_SI_4_1)[names(Table_SI_4_1) == "substance_name"] <- "Pesticide"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "pesticide_type"] <- "Pesticide type"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.min_agriculture"] <- "Concentration_min_agriculture [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.min_edge"] <- "Concentration_min_edge [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.min_refuge"] <- "Concentration_min_refuge [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.max_agriculture"] <- "Concentration_max_agriculture [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.max_edge"] <- "Concentration_max_edge [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "concentration_ug_L.max_refuge"] <- "Concentration_max_refuge [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "EC50_ug_L"] <- "Effect value EC50 [µg/L]"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "tax_taxon"] <- "Effect value test species"
+names(Table_SI_4_1)[names(Table_SI_4_1) == "reference"] <- "Effect value reference"
+Table_SI_4_1[Table_SI_4_1==0]<-"<LOD"
+# save results
+write.csv(Table_SI_4_1, "20220412_Table_SI_4_substance_specific_data_effect&exposure.csv", row.names = FALSE)
+```
+
+## 1.3 Additional analyses and plots for the section pesticide exposure in the main manuscript and SI
+### 1.3.1 Number of detected pesticides
+#### 1.3.1.1 Calculation
+```{r}
+#calculate number of detected compounds per site_type
+no_psm <- ddply(psm_conc_RP_2019, c("stream","site_type","date_pesticide_sampling"), summarise, nb_detected = length(concentration_ug_L))
+#filter June sampling
+no_psm_1 <- no_psm[no_psm$date_pesticide_sampling == "20190611"|no_psm$date_pesticide_sampling == "20190612", ] 
+```
+
+#### 1.3.1.2 Figure 2A - nb of detected pesticides
+```{r}
+#plot results
+fig_2_A <- 
+  ggplot(no_psm_1, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y = nb_detected, fill = site_type)) +
+   geom_violin(trim = FALSE, alpha=0.1)+
+    geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+   stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = "SumTU") +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+    scale_y_continuous(name="Number of detected pesticides",breaks = c(0,10,20,30,40,50,60), labels=c(0,10,20,30,40,50,60),limits = c(0,60))+
+      scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="site",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     scale_x_discrete(name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_2_A
+```
+
+#### 1.3.1.3 Calculate detection frequency for each compound per site type (Table SI 14)
+```{r}
+#filter
+#for June
+det_frequ_june<- psm_conc_RP_2019[psm_conc_RP_2019$date_pesticide_sampling == "20190611"|psm_conc_RP_2019$date_pesticide_sampling == "20190612", ]
+#calculate detection frequency - June
+det_frequ_june_wide<- reshape2::dcast(det_frequ_june, substance_name+pesticide_type ~ site_type, value.var="concentration_ug_L", length)
+det_frequ_join<-det_frequ_june_wide
+#calculate the percentages
+det_frequ_join$agriculture<-det_frequ_join$agriculture/6*100
+det_frequ_join$refuge<-det_frequ_join$refuge/6*100
+det_frequ_join$edge<-det_frequ_join$edge/6*100
+#round to zero digits
+det_frequ_join[,3:5]<-round2(det_frequ_join[,3:5],digits = 0)
+```
+
+```{r}
+# create a nice table output
+#order columns new
+det_frequ_join<- det_frequ_join[, c(1,2,5,4,3)]
+#first letter capital
+det_frequ_join$substance_name<-str_to_sentence(det_frequ_join$substance_name)
+det_frequ_join$pesticide_type<-gsub("insecticides", "Insecticide", det_frequ_join$pesticide_type,fixed = TRUE)
+det_frequ_join$pesticide_type<-gsub("herbicides", "Herbicide", det_frequ_join$pesticide_type,fixed = TRUE)
+det_frequ_join$pesticide_type<-gsub("fungicides", "Fungicide", det_frequ_join$pesticide_type,fixed = TRUE)
+#nice renaming
+names(det_frequ_join)[names(det_frequ_join) == "agriculture"] <- "Agriculture"
+names(det_frequ_join)[names(det_frequ_join) == "refuge"] <- "Refuge"
+names(det_frequ_join)[names(det_frequ_join) == "edge"] <- "Edge"
+names(det_frequ_join)[names(det_frequ_join) == "substance_name"] <- ""
+names(det_frequ_join)[names(det_frequ_join) == "pesticide_type"] <- ""
+#all NA's to zero
+det_frequ_join[is.na(det_frequ_join)]<-0
+#nice table
+kable_out<-det_frequ_join%>%
+  kbl(align="llccc") %>%
+  kable_classic(full_width = F) %>%
+  column_spec(1:5,background = "white") %>%
+  row_spec(0,bold = T,background = "white") %>%
+  column_spec(1,bold = T) %>%
+    add_header_above(c("Detected pesticide"=1,"Pesticide type"=1, "Detection frequency"=3),bold = T,align ="l",background = "white")
+#save as html
+readr::write_file(kable_out, "20220412_Table_SI_14_detection_frequency.html")
+```
+
+#### 1.3.1.4 Figure SI 12A - per pesticide type
+```{r, message=FALSE, warning=FALSE}
+#calculate number of detected compounds per sample and pesticide type
+no_psm_type <- data.frame(cast(psm_conc_RP_2019, uniqueID  ~ pesticide_type, value = "concentration_ug_L",  length))
+#transform to long table format
+no_psm_type_long<-gather(no_psm_type,pesticide_type,nb_detected,c("fungicides","herbicides","insecticides"))
+#separate uniqueID
+no_psm_type_long<-separate(data = no_psm_type_long ,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+#filter for June 2019
+no_psm_type_long_1 <- no_psm_type_long[no_psm_type_long$date_pesticide_sampling == "20190611"|no_psm_type_long$date_pesticide_sampling == "20190612", ] 
+no_psm_type_long_1$pesticide_type<-str_to_title(no_psm_type_long_1$pesticide_type)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#plot results
+fig_SI_12_A <- 
+  ggplot(no_psm_type_long_1, mapping=aes(x = factor(site_type,level=c("refuge","edge","agriculture")), y = nb_detected,fill = site_type)) +
+  facet_grid(.~pesticide_type,scales = 'free', space="free")+#facet_grid(stream~method)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+ # stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+  # stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+    labs(title="",x="", y = "Number of detected compounds") +
+         scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_SI_12_A
+```
+
+### 1.3.2 Total concentrations 
+#### 1.3.2.1 Calculation
+```{r}
+#calculate
+sumconc_sample <- ddply(psm_conc_RP_2019, c("stream","site_type","date_pesticide_sampling"), summarise, sumconc = sum(concentration_ug_L))
+#filter for June 2019
+sumconc_sample_1 <- sumconc_sample[sumconc_sample$date_pesticide_sampling == "20190611"|sumconc_sample$date_pesticide_sampling == "20190612", ] 
+```
+
+#### 1.3.2.2 Figure 2B - total conc
+```{r}
+#plot results
+fig_2_B <- 
+  ggplot(sumconc_sample_1, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y = sumconc, fill = site_type)) +
+   geom_violin(trim = FALSE, alpha=0.1)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+      stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+       stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+   scale_y_continuous(trans=log10_trans(), breaks = c(0.0001,0.001, 0.01, 0.1, 1,10),labels = c(0.0001,0.001, 0.01, 0.1, 1, 10), limits = c(0.0001, 25))+#,
+ # annotation_logticks(sides = "l") +
+    labs(title="",x="Site type", y = "Total concentration [µg/L]") +
+     scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     scale_x_discrete(name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_2_B
+```
+
+#### 1.3.2.3 Figure SI 12B - per pesticide type 
+```{r, message=FALSE, warning=FALSE}
+#calculate
+sumconc_type <-  data.frame(cast(psm_conc_RP_2019, uniqueID ~ pesticide_type, value = "concentration_ug_L",  sum))
+#transform to long table format
+sumconc_type_long<-gather(sumconc_type,pesticide_type,sum_conc,c("fungicides","herbicides","insecticides"))
+#separate uniqueID
+sumconc_type_long<-separate(data = sumconc_type_long,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+#filter for June 2019
+sumconc_type_long_1 <- sumconc_type_long[sumconc_type_long$date_pesticide_sampling == "20190611"|sumconc_type_long$date_pesticide_sampling == "20190612", ] 
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+#before plotting results, all zero concentrations must be mutated to a very low number in order to avoid infinite numbers when log transforming the concentrations
+sumconc_type_long_1_zeros<-sumconc_type_long_1
+sumconc_type_long_1_zeros[] <- mapply(function(d, x1, x2){ ifelse(d == x1, x2, d) },
+                d = sumconc_type_long_1_zeros, 
+                x1 = c(0),
+                x2 = c(0.00000001))
+str(sumconc_type_long_1_zeros)
+sumconc_type_long_1_zeros$sum_conc<-as.numeric(sumconc_type_long_1_zeros$sum_conc)
+# a <- annotation_logticks(sides='l')
+# a$data <- data.frame(x=NA, pesticide_type=c("fungicides"))
+sumconc_type_long_1_zeros$pesticide_type<-str_to_title(sumconc_type_long_1_zeros$pesticide_type)
+#plot results
+fig_SI_12_B <- 
+    ggplot(sumconc_type_long_1_zeros, aes(x = factor(site_type,level=c("refuge","edge","agriculture")) , y = sum_conc,fill=site_type)) +
+  facet_grid(.~pesticide_type,scales = 'free', space="free")+#facet_grid(stream~method)+
+  #geom_violin(trim = FALSE, alpha=0.1)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+ # stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+  # stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+      labs(title="",x="", y = "Total concentration [µg/L]") +
+      #scale_y_log10(breaks = c(0.00001,0.1,1), labels=c(0.0001,0.1,1),limits = c(0.0001, 1))+
+     scale_y_continuous(trans=log10_trans(), breaks = c(0.00000001,0.0000001,0.000001,0.00001,0.0001,0.001, 0.01, 0.1, 1,10),labels = c(0,0.0000001,0.000001,0.00001,0.0001,0.001, 0.01, 0.1, 1, 10), limits = c(0.00000001, 10))+#, labels=function(n){format(n, scientific = TRUE)}) +
+     scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    #scale_x_discrete(name="pesticide type", breaks=c("Insecticide","herbicides","Fungicide"), labels=c("insecticides","herbicides","fungicides"))+
+     theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        #legend.justification=c(0.05,0.95), 
+        #legend.position=c(0.05,0.95),
+        #legend.title = element_text(colour="blue", size=16, face="bold"),
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_SI_12_B#+a
+```
+
+### 1.3.3 Toxicity
+#### 1.3.3.1 Over the whole period (Figure SI 11)
+a) Prepare data
+```{r}
+#Prepare data frame
+sumTU_2<-sumTU
+#renaming of all dates to have only a single date per KGM-round
+sumTU_2$newdate<-gsub("20190409", "20190408", sumTU_2$date_pesticide_sampling,fixed = TRUE)
+sumTU_2$newdate<-gsub("20190410", "20190408", sumTU_2$newdate,fixed = TRUE)
+sumTU_2$newdate<-gsub("20190521", "20190520", sumTU_2$newdate,fixed = TRUE)
+sumTU_2$newdate<-gsub("20190612", "20190611", sumTU_2$newdate,fixed = TRUE)
+sumTU_2$newdate<-gsub("20190703", "20190701", sumTU_2$newdate,fixed = TRUE)
+sumTU_2$newdate <- as.Date(sumTU_2$newdate,format="%Y%m%d")
+#create three separate data frames to enable easier plotting
+#filter for agriculture whole period
+sumTU_2_1 <- sumTU_2[sumTU_2$site_type == "agriculture", ]
+sumTU_2_1<- with(sumTU_2_1,sumTU_2_1[(!newdate == "2019-06-11"),])
+#filter for refuge Modenbach whole period
+sumTU_2_2<- sumTU_2[sumTU_2$site_type == "refuge" & sumTU_2$stream == "Modenbach", ]
+#filter for refuge and edge sites on 11-12 june, without Modenbach
+sumTU_2_3<- with(sumTU_2,sumTU_2[(newdate == "2019-06-11"),])
+sumTU_2_3<-sumTU_2_3 %>% filter(!uniqueID == "Modenbach_refuge_20190611")
+```
+
+b) Figure SI 11
+```{r}
+#change locale to English for correct month labeling
+Sys.setlocale("LC_ALL", "English") 
+#Plot sumTU over the whole period
+fig_SI_11 <- 
+ggplot() + 
+   geom_hline(yintercept=-3, linetype="dashed", color = "red",size=0.6)+
+  geom_hline(yintercept=-4, linetype="dashed", color = "orange",size=0.6)+
+  geom_jitter(sumTU_2_1, mapping=aes(x = newdate , y = sumTU_iv,colour=site_type,fill=site_type),alpha=1,size=2.5,position = position_dodge2(width = 6))+ 
+  geom_jitter(sumTU_2_2, mapping=aes(x = newdate , y = sumTU_iv,colour=site_type,fill=site_type),pch=17,alpha=1,size=2.5,position = position_dodge2(width = 6),show.legend = F)+ 
+  geom_jitter(sumTU_2_3, mapping=aes(x = newdate , y = sumTU_iv,colour=site_type,fill=site_type),alpha=1,size=2.5,position = position_dodge2(width = 6))+ 
+    labs(title="",x="Sampling date", y = "sumTU") +
+    scale_y_continuous(breaks = c(-8,-6,-4,-2,0,2), limits = c(-8,2), labels=function(n){format(n, scientific = FALSE)}) +
+   scale_x_date(date_labels = "%B",limits = as.Date(c("2019-04-01","2019-07-15"))) +#
+   scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.title = element_text(colour="black", size=12),
+        legend.text = element_text(colour="black", size=10.5),
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_SI_11
+#save figure
+svg(filename="20220412_Figure_SI_11.svg",  width=6, height=4, pointsize=15)
+fig_SI_11
+dev.off()
+ggsave(filename = "20220412_Figure_SI_11.eps",fig_SI_11, width=6, height=4, pointsize=15,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+dev.off()
+```
+
+c) Examine if the single grab sampling in June is representative for baseline toxicity over the whole season
+```{r}
+#select sites that have been sampled during the whole period
+sumTU_aov<-sumTU_2%>% filter(!site_type == "edge"&!uniqueID == "Hainbach_refuge_20190611"&!uniqueID == "Kropsbach_refuge_20190611"&!uniqueID == "Triefenbach_refuge_20190611"&!uniqueID == "Russbach_refuge_20190612"&!uniqueID == "Otterbach_refuge_20190612")
+#anova
+sumTU_aov$newdate  	<- factor(sumTU_aov$newdate) 
+one.way<-aov(sumTU_iv~newdate,sumTU_aov)
+summary(one.way)
+par(mfrow=c(2,2))
+plot(one.way)
+```
+Conclusion: The estimated pesticide toxicity for June (sampling temporally closest to invertebrate sampling) was similar to other samplings throughout the season of pesticide application from April to July (One-way ANOVA with sumTU as response and sampling date as predictor, p=0.97; Table SI 10, Fig. SI 11). Hence, we consider the June sampling as largely representative of the general baseline exposure. 
+
+#### 1.3.3.2 sumTU driving substances (Table SI 13)
+a) Calculate % contribution of each compound to the sumTU
+```{r}
+#change to wide table matrix format
+tox_iv_count <- as.data.table(tox_iv)
+tox_iv_count <- dcast(tox_iv_count, substance_name ~ uniqueID, value.var=c("tox_iv_fac"))
+#select only compound name information
+names_tox_iv_count <- tox_iv_count[,1]
+#select only compound tox information
+tox_iv_count <- tox_iv_count[,2:47]
+#calculate the relative contribution of each single compound to sumTU per sample
+tox_iv_count <- as.data.frame(t(t(tox_iv_count) / colSums(tox_iv_count, na.rm = TRUE)))
+# Now the values are in percent or rather a factor of 1
+# check if everywhere 100%
+#colSums(tox_iv_count, na.rm = TRUE) # correct
+```
+
+```{r}
+#bind compound and their relative contribution to sumTU 
+contribution_iv <- cbind(names_tox_iv_count, tox_iv_count)
+#transform to long table format
+contribution_iv_long<-gather(contribution_iv,uniqueID,contribution_sumTU,c(2:47))
+#clean and prepare some variables for plotting
+contribution_iv_long <-separate(data = contribution_iv_long ,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+#merge with sumTU data
+sumTU_iv_RP_2019_num<-sumTU_iv_RP_2019[,c("uniqueID","sumTU_iv")]
+contribution_iv_long_0<-merge(contribution_iv_long,sumTU_iv_RP_2019_num,by = "uniqueID")
+```
+
+b) Calculate how often a compound drove relevant sumTUs (driving considerably >=10 %; relevant >=-4) 
+Note: the calculation is done total/cumulative over all 6 streams per site type.
+```{r}
+#filter for sumTU>=-4 and compounds contributing to at least 10 % to that sumTU
+contribution_iv_long_1<-subset(contribution_iv_long_0, sumTU_iv>= -4)
+contribution_iv_long_1<-subset(contribution_iv_long_1, contribution_sumTU>=0.10)
+```
+
+```{r}
+#calculate how often a compound contributed >=10% to a sumTU>=-4
+####June and rest of the season separately treated
+#filter
+#for June
+contribution_june<- contribution_iv_long_1[contribution_iv_long_1$date_pesticide_sampling == "20190611"|contribution_iv_long_1$date_pesticide_sampling == "20190612", ]
+#for rest of the season
+contribution_rest<- contribution_iv_long_1[!contribution_iv_long_1$date_pesticide_sampling == "20190611"&!contribution_iv_long_1$date_pesticide_sampling == "20190612", ]
+#calculate
+#June
+contribution_june_wide<- reshape2::dcast(contribution_june, substance_name  ~ site_type, value.var="contribution_sumTU", length)
+#rest
+contribution_rest_wide<- reshape2::dcast(contribution_rest, substance_name  ~ site_type, value.var="contribution_sumTU", length)
+#join June and rest of the season
+contribution_join<- left_join(contribution_rest_wide,contribution_june_wide,by="substance_name")
+```
+
+c) Table_SI_13
+```{r echo=FALSE}
+#create nice table output
+df_summary_2<-contribution_join
+ # rename with additional information "site_type (nr of samplings where sumTU >= -4/ nr of total samplings)"
+names(df_summary_2)[names(df_summary_2) == "agriculture.x"] <- "Agriculture (21/24)"
+names(df_summary_2)[names(df_summary_2) == "agriculture.y"] <- "Agriculture (6/6)"
+names(df_summary_2)[names(df_summary_2) == "edge"] <- "Edge (2/6)"
+names(df_summary_2)[names(df_summary_2) == "refuge.y"] <- "Refuge (3/6)"
+names(df_summary_2)[names(df_summary_2) == "refuge.x"] <- "Refuge (2/4)"
+#order rows alphabetic
+df_summary_2<-df_summary_2[order(df_summary_2$substance_name),]
+#nice renaming
+#first letter capital
+df_summary_2$substance_name<-str_to_sentence(df_summary_2$substance_name)
+ names(df_summary_2)[names(df_summary_2) == "substance_name"] <- ""
+#order columns
+df_summary_2<-df_summary_2[,c(1,6,5,4,3,2)]
+df_summary_2[is.na(df_summary_2)]<-0
+#print nice table
+kable_out<-df_summary_2%>%
+  kbl(align="lccccc") %>%
+  kable_classic(full_width = F) %>%
+  column_spec(1:6,background = "white") %>%
+  row_spec(0,bold = T,background = "white") %>%
+  column_spec(1,bold = T) %>%
+  add_header_above(c("sumTU-driving pesticide"=1, "Number of contributions - June"=3,"Number of contributions - April, May, July" = 2),bold = T,align ="l",background = "white")# %>% #
+# save_kable("20211022_SI_contribution.png")
+#save as html
+readr::write_file(kable_out, "20220412_Table_SI_13_driving_sumTU.html")
+```
+
+#### 1.3.3.3 Figure SI 12C - per pesticide type
+```{r}
+# #per pesticide type
+#calculate
+sumTU_type <-  data.frame(cast(tox_iv, uniqueID ~ pesticide_type, value = "tox_iv_fac",  sum))
+#transform to long table format
+sumTU_type_long<-gather(sumTU_type ,pesticide_type,sumTU_iv,c("fungicides","herbicides","insecticides"))
+#separate uniqueID
+sumTU_type_long<-separate(data = sumTU_type_long,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+#filter for June 2019
+sumTU_type_long_1 <- sumTU_type_long[sumTU_type_long$date_pesticide_sampling == "20190611"|sumTU_type_long$date_pesticide_sampling == "20190612", ] 
+```
+
+```{r}
+#filter data
+#clean and prepare some variables for plotting
+sumTU_type_zeros <-sumTU_type_long_1
+sumTU_type_zeros[] <- mapply(function(d, x1, x2){ ifelse(d == x1, x2, d) },
+                d = sumTU_type_zeros, 
+                x1 = c(0),
+                x2 = c(0.000000001))
+str(sumTU_type_zeros)
+sumTU_type_zeros$sumTU_iv<-as.numeric(sumTU_type_zeros$sumTU_iv)
+sumTU_type_zeros$pesticide_type<-str_to_title(sumTU_type_zeros$pesticide_type)
+```
+
+```{r}
+#plot data
+fig_SI_12_C <- 
+    ggplot(sumTU_type_zeros, aes(x = factor(site_type,level=c("refuge","edge","agriculture")) , y = sumTU_iv,fill=site_type)) + 
+    geom_hline(yintercept=0.001, linetype="dashed", color = "red")+
+  geom_hline(yintercept=0.0001, linetype="dashed", color = "orange")+
+  facet_grid(.~pesticide_type,scales = 'free', space="free")+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5, position=position_jitterdodge(dodge.width=0.9))+ 
+ # stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+  # stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+      labs(title="",x="", y = "sumTU") +
+  scale_y_continuous(trans=log10_trans(), breaks = c(0.000000001,0.00000001,0.0000001,0.000001,0.00001,0.0001,0.001, 0.01, 0.1, 1),labels = c("-Inf","-8","-7","-6","-5","-4","-3", "-2", "-1", "0"), limits = c(0.000000001, 1))+#,
+     scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+     theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_SI_12_C
+```
+
+# 2. Hypothesis 2: Characterise community effects
+Assessing hypothesis 2 (see manuscript):	"We hypothesised that dispersal processes result in the propagation of pesticide effects to the edge area, measurable as a reduction in pesticide-sensitive species at edges compared to refuges further upstream."
+
+## 2.1 Load and prepare data
+```{r}
+#load macroinvertebrate sampling data for June 2019 RP
+df_start <- read.csv(file="20220412_rawdata_4_community_data.csv",header=TRUE, sep=",", na.strings =c("na","NA",""),stringsAsFactors = FALSE, check.names = FALSE)
+#calculate abundance_m2 per m^2, the surber samples has a dimension of 0.32m*0.32m=0.1024m^2
+surbersampler_m2<-0.1024
+#Equation: abundance_m2=total abundance_absolut/(area surber sampler* nr of subsamples)
+df_start$abundance_m2<-df_start$abundance_absolut/(surbersampler_m2*df_start$number_of_kicks)
+```
+
+Round abundance
+```{r}
+#round abundance_m2 to one digit
+df_start$abundance_m2<-round2(df_start$abundance_m2,digits = 1)
+```
+
+Prepare a data frame where all zero-abundances are removed
+```{r}
+df_community <- df_start[!df_start$abundance_absolut == "0", ]
+```
+
+## 2.2 Taxonomic richness
+### 2.2.1 Calculation
+```{r}
+#Calculation
+richness<-reshape2::dcast(df_community, stream  ~ site_type, value.var =   "identified_taxa", fun.aggregate =  length)
+richness_long<-gather(data = richness,site_type,richness,2:4)
+```
+
+### 2.2.2 Statistics
+```{r}
+#statistics for the following data frame
+df_statistics<-as.data.frame(richness_long)
+#change variables to factor
+df_statistics$site_type  	<- factor(df_statistics$site_type) 
+df_statistics$stream  	<- factor(df_statistics$stream)
+```
+
+a) Data exploration
+```{r}
+dev.off()
+#outlier
+outlier_values <- boxplot.stats(df_statistics$richness)$out  # outlier values.
+boxplot(df_statistics$richness, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(richness~site_type, data=df_statistics)
+leveneTest(richness~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$richness)
+shapiro.test(df_statistics$richness)
+```
+Data are reasonably normally distributed, variances homogenize and there are no problematic outliers.
+
+b) Model
+```{r}
+#linear mixed model
+lmm_richness <- lmer(richness ~ site_type + (1|stream), data = df_statistics,REML = T)
+lmm<-lmm_richness
+```
+
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)#fine
+check_homogeneity(lmm) #fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))#fine
+check_normality(lmm) 
+#general model check
+check_singularity(lmm) #fine
+check_convergence(lmm) #fine
+```
+Model is valid.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")#, p.val = "kr"
+model_performance(lmm) # R2 cond. indicates that random factor describes some variance
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is not significant, can be droped
+```
+
+### 2.2.3 Figure 3A - richness
+```{r}
+#plot
+fig_3_A <- 
+  ggplot(richness_long, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y =richness , fill = site_type)) +
+  geom_violin(trim = FALSE, alpha=0.1)+
+  geom_line(aes(group=stream), size=1.3, alpha=0.15)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5 )+ 
+    stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = "SumTU") +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+  scale_y_continuous(limits = c(0, NA))+
+  labs(title="",x="", y = "Taxonomic richness") +
+  scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_x_discrete(name="Site type", breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),#text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text (colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_3_A
+```
+
+## 2.3 Total abundance
+### 2.3.1 Calculation
+```{r}
+av_abundance<-reshape2::dcast(df_community, stream ~ site_type, value.var = "abundance_m2", fun.aggregate =  sum) 
+av_abundance_long<-gather(av_abundance,site_type,av_abundance,2:4)
+```
+
+### 2.3.2 Statistics
+```{r}
+dev.off()
+#statistics for the following data frame
+df_statistics<-av_abundance_long
+#change variables to factor
+df_statistics$site_type  	<- factor(df_statistics$site_type) 
+df_statistics$stream  	<- factor(df_statistics$stream)
+```
+
+a) Data exploration
+```{r}
+#outlier
+outlier_values <- boxplot.stats(df_statistics$av_abundance)$out  # outlier values.
+boxplot(df_statistics$av_abundance, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(av_abundance~site_type, data=df_statistics)
+leveneTest(av_abundance~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$av_abundance)
+shapiro.test(df_statistics$av_abundance)#not normally distributed
+#this assumption is violated, also the model validation of normal distribution of residuals is violated if a LMM is fitted to the raw response
+#--> logarithmic transformation of response variable
+df_statistics$av_abundance_log<-log10(df_statistics$av_abundance)
+#outlier
+outlier_values <- boxplot.stats(df_statistics$av_abundance_log)$out  # outlier values.
+boxplot(df_statistics$av_abundance_log, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(av_abundance_log~site_type, data=df_statistics)
+leveneTest(av_abundance_log~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$av_abundance_log)
+shapiro.test(df_statistics$av_abundance_log)#now response is normally distributed
+```
+After transformation, data are reasonably normally distributed, variances homogeneous and there are no problematic outliers.
+
+b) Model
+```{r}
+#linear mixed model
+lmm_av_abundance <- lmer(av_abundance_log ~ site_type + (1|stream), data = df_statistics,REML = T)
+lmm<-lmm_av_abundance
+```
+
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)
+check_homogeneity(lmm) #fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))
+check_normality(lmm) 
+#this assumption was violated, before using log-transformed response data, now with the transformed data the model is acceptable
+#general model check
+#check_model(lmm) # fine
+check_singularity(lmm) #violated?
+check_convergence(lmm) #fine
+```
+Model is valid.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+model_performance(lmm)
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is not significant, can be droped
+```
+
+### 2.3.3 Figure 3B - abundance
+```{r}
+#plot
+fig_3_B <- 
+  ggplot(av_abundance_long, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y =av_abundance, fill = site_type)) +
+  geom_violin(trim = FALSE, alpha=0.1)+
+  geom_line(aes(group=stream), size=1.3, alpha=0.15)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5)+ 
+    stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = "SumTU") +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+  scale_y_continuous(limits = c(0, NA), labels = comma_format(big.mark = ".",
+                                           decimal.mark = ","))+
+  labs(title="",x="", y = "Total abundance") +
+  scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_x_discrete(name="Site type", breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_3_B
+```
+
+### 2.3.4 Figure SI 15
+Special for SI: Total abundance and richness per order
+```{r}
+#Calculate
+#a) average abundance per order
+abundance_order<-aggregate(abundance_m2 ~ uniqueID + order, FUN=sum,data=df_community)
+abundance_order$abundance_m2<-log10(abundance_order$abundance_m2+1)
+
+#) average richness per order
+richness_order<-reshape2::dcast(df_community, uniqueID  ~ order, value.var =   "identified_taxa", fun.aggregate =  length)
+richness_order_long<-gather(data = richness_order,order,richness,2:19)
+```
+
+```{r}
+#join both data frames: abundance and richness
+order_join<-left_join(richness_order_long,abundance_order, by=c("uniqueID","order"))
+#separate the uniqueID-label
+order_join<-separate(order_join,col = "uniqueID",into = c("stream","site_type","date_MI_sampling"),sep="_",remove = FALSE)
+#renaming
+names(order_join)[names(order_join) == "richness"] <- "Taxonomic richness [nr of taxa]"
+names(order_join)[names(order_join) == "abundance_m2"] <- "Total abundance [individuals/m²] - Log10" 
+#from wide to long format
+order_join_long<-gather(data = order_join,metric,value,6:7)
+#replace all NAs with zero
+order_join_long$value[is.na(order_join_long$value)]<-0
+#filter for selected orders, that are often associated with water quality
+interesting_orders<-order_join_long %>% dplyr::filter(order=="Plecoptera"|order=="Odonata"|order=="Diptera"|order=="Amphipoda"|order=="Oligochaeta"|order=="Ephemeroptera"|order=="Trichoptera"|order=="Coleoptera")
+#plot for the selected orders
+Figure_SI_15<-
+  ggplot(interesting_orders, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y =value , fill = site_type)) +
+  facet_grid(metric~order, scales = "free_y",switch = "y")+
+  geom_violin(trim = FALSE, alpha=0.1)+
+  geom_line(aes(group=stream), size=1.5, alpha=0.15)+
+   geom_point(mapping=aes(colour=site_type),alpha=1,size=2)+
+   stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+       stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+  scale_y_continuous(limits = c(0, NA))+
+  labs(title="",x="Site type", y = "") +
+  scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_x_discrete(name="Site type", breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=11),
+        axis.title.y = element_text(colour="black",size=11),
+        axis.text.x = element_text(colour="black", size=8),
+        axis.text.y = element_text(colour="black", size=10),
+        strip.text = element_text(size = 11),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+Figure_SI_15
+#save plot
+svg(filename="20220412_Figure_SI_15.svg",  width=12, height=7, pointsize=10)
+Figure_SI_15
+dev.off()
+ggsave(filename = "20220412_Figure_SI_15.eps",Figure_SI_15, width=12, height=7, pointsize=10,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+dev.off()
+```
+
+## 2.4 Jaccard
+### 2.4.1 Calculation
+Define Jaccard similarity function.
+```{r}
+jaccard <- function(a, b) {
+  intersection = length(intersect(a, b))
+  union = length(a) + length(b) - intersection
+  return (intersection/union)
+}
+```
+
+```{r}
+#subset df for important columns, use df without zero abundances
+df_jaccard_1<-df_community[,c("identified_taxa","stream","site_type")]
+#split df
+dfList<-split(df_jaccard_1,list(df_jaccard_1$stream,df_jaccard_1$site_type) )
+#calculate Jaccard Similarity between the two set --> jaccard(a, b)
+edge_refuge<-c(
+  jaccard(dfList[["Hainbach.edge"]][[1]],dfList[["Hainbach.refuge"]][[1]]),
+  jaccard(dfList[["Modenbach.edge"]][[1]],dfList[["Modenbach.refuge"]][[1]]),
+  jaccard(dfList[["Kropsbach.edge"]][[1]],dfList[["Kropsbach.refuge"]][[1]]),
+  jaccard(dfList[["Russbach.edge"]][[1]],dfList[["Russbach.refuge"]][[1]]),
+  jaccard(dfList[["Otterbach.edge"]][[1]],dfList[["Otterbach.refuge"]][[1]]),
+  jaccard(dfList[["Triefenbach.edge"]][[1]],dfList[["Triefenbach.refuge"]][[1]]))
+agriculture_refuge<-c(
+  jaccard(dfList[["Hainbach.agriculture"]][[1]],dfList[["Hainbach.refuge"]][[1]]),
+  jaccard(dfList[["Modenbach.agriculture"]][[1]],dfList[["Modenbach.refuge"]][[1]]),
+  jaccard(dfList[["Kropsbach.agriculture"]][[1]],dfList[["Kropsbach.refuge"]][[1]]),
+  jaccard(dfList[["Russbach.agriculture"]][[1]],dfList[["Russbach.refuge"]][[1]]),
+  jaccard(dfList[["Otterbach.agriculture"]][[1]],dfList[["Otterbach.refuge"]][[1]]),
+  jaccard(dfList[["Triefenbach.agriculture"]][[1]],dfList[["Triefenbach.refuge"]][[1]]))
+agriculture_edge<-c(
+  jaccard(dfList[["Hainbach.agriculture"]][[1]],dfList[["Hainbach.edge"]][[1]]),
+  jaccard(dfList[["Modenbach.agriculture"]][[1]],dfList[["Modenbach.edge"]][[1]]),
+  jaccard(dfList[["Kropsbach.agriculture"]][[1]],dfList[["Kropsbach.edge"]][[1]]),
+  jaccard(dfList[["Russbach.agriculture"]][[1]],dfList[["Russbach.edge"]][[1]]),
+  jaccard(dfList[["Otterbach.agriculture"]][[1]],dfList[["Otterbach.edge"]][[1]]),
+  jaccard(dfList[["Triefenbach.agriculture"]][[1]],dfList[["Triefenbach.edge"]][[1]]))
+#merge the three sets
+df_jaccard<-data.frame(agriculture_refuge,agriculture_edge,edge_refuge)
+#add stream information
+df_jaccard$stream<-c("Hainbach","Modenbach","Kropsbach","Russbach","Otterbach","Triefenbach")
+#from wide to long
+df_jaccard_long<-gather(df_jaccard,site_type,jaccard,1:3)
+```
+
+### 2.4.2 Statistics
+```{r}
+dev.off()
+#statistics for the following data frame
+df_statistics<-df_jaccard_long
+#change variables to factor
+df_statistics$site_type  	<- factor(df_statistics$site_type) 
+df_statistics$stream  	<- factor(df_statistics$stream)
+```
+
+a) Data exploration
+```{r}
+#outlier
+outlier_values <- boxplot.stats(df_statistics$jaccard)$out  # outlier values.
+boxplot(df_statistics$jaccard, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(jaccard~site_type, data=df_statistics)
+leveneTest(jaccard~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$jaccard)
+shapiro.test(df_statistics$jaccard)#normally distributed
+```
+Data are reasonably normally distributed, variances homogeneous and there are no problematic outliers.
+
+b) Model
+```{r}
+#linear mixed model
+lmm_jaccard <- lmer(jaccard ~ site_type + (1|stream), data = df_statistics,REML = T)
+lmm<-lmm_jaccard
+```
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)
+check_homogeneity(lmm) #fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))
+check_normality(lmm) #fine
+#general model check
+#check_model(lmm) # everthing looks fine
+check_singularity(lmm) #fine
+check_convergence(lmm) #fine
+```
+Model is valid.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+model_performance(lmm) 
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is significant
+#posthoc - more conservative --> used for main manuscript
+emmeans(lmm, list(pairwise ~ site_type), adjust = "tukey")
+```
+
+### 2.4.3 Figure 3C - jaccard
+```{r}
+#plot
+fig_3_C <- 
+  ggplot(df_jaccard_long, mapping=aes(x =factor(site_type,level=c("agriculture_refuge","agriculture_edge","edge_refuge")), y = jaccard)) +
+  geom_violin(trim = FALSE, alpha=0.1)+
+  geom_line(aes(group=stream), size=1.3, alpha=0.15)+
+  geom_point(mapping=aes(x=factor(site_type,level=c("agriculture_refuge","agriculture_edge","edge_refuge"))),alpha=0.2,size=2.5)+  
+  stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = "SumTU") +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+   labs(title="",x="", y = "Jaccard index") +
+  scale_y_continuous(limits = c(0, 1))+
+  scale_x_discrete(name="Pairwise comparisons of site types", breaks = c("edge_refuge","agriculture_edge","agriculture_refuge"), labels=c("Edge - Refuge","Agric - Edge","Agric - Refuge"))+
+       theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=10),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_3_C
+```
+
+## 2.5 SPEARpesticides
+### 2.5.1 Load SPEAR data
+```{r}
+#load SPEAR_class and link data from https://www.systemecology.de/indicate
+df_SPEAR_class <- read.csv(file="20220412_rawdata_5_trait_database_indicate.csv",header=TRUE, sep=",", na.strings =c("na","NA",""),stringsAsFactors = FALSE, check.names = FALSE)
+df_taxa_link_ORIG<- read.csv(file="20220412_rawdata_6_taxa_link_indicate.csv",header=TRUE, sep=",", na.strings =c("na","NA",""),stringsAsFactors = FALSE, check.names = FALSE)
+
+#We create our own SPEAR class, which ignores the trait "refuge", for explanation see main manuscript
+df_SPEAR_class_2<-df_SPEAR_class %>%
+  mutate(
+    SPEAR_class=case_when(
+      is.na(sensitivity) ~ NA_real_,
+      is.na(generation_time)~ NA_real_,
+      is.na(exposition)~ NA_real_,
+      sensitivity>=-0.36 & generation_time>=0.5 & exposition==1 ~ 1,
+      TRUE ~ 0
+    )
+  )
+```
+
+### 2.5.2 Calculation
+```{r}
+#renaming
+names(df_community)[names(df_community) == "identified_taxa"] <- "taxa"
+#add taxa_link to each taxa in the monitoring community data frame
+df_community_SPEAR<-merge(df_community,df_taxa_link_ORIG, by="taxa")
+str(df_community_SPEAR)
+df_SPEAR<-df_community_SPEAR
+
+#SPEAR calculation
+#aggregate: sum up all abundances per sample which have the same taxa_link
+df_SPEAR_ag<-aggregate(abundance_m2 ~ uniqueID + taxa_link, FUN=sum, data=df_SPEAR)
+nrow(df_SPEAR_ag)#504
+nrow(df_SPEAR)#684
+
+#Calculate log(4*xi+1) the denominator
+df_SPEAR_ag$denom=log10(4*df_SPEAR_ag$abundance_m2+1) # plus 1, due to null abundances, no brackets
+
+#add SPEAR-class (y) information to each taxa in the community data frame via link_taxa
+df_SPEAR_calc=merge(df_SPEAR_ag,df_SPEAR_class_2[,c("taxa_link","SPEAR_class")], by="taxa_link")
+
+#all taxa without SPEAR_class are removed
+test_na=which(is.na(df_SPEAR_calc$SPEAR_class));test_na
+if(length(test_na)>0){
+  df_SPEAR_calc=df_SPEAR_calc[-which(is.na(df_SPEAR_calc$SPEAR_class)),]}
+nrow(df_SPEAR_calc) # 471
+
+#Calculate log(4*xi+1)*y the nominator
+df_SPEAR_calc$nom = df_SPEAR_calc$denom*df_SPEAR_calc$SPEAR_class
+
+#Calculate the SPEARpesticide
+df_SPEARpesticide<- ddply(df_SPEAR_calc, c("uniqueID"), summarise, SPEARpesticide = sum(nom,na.rm = T)/sum(denom,na.rm = T))
+
+#normalize the SPEARpesticide to reference value of 44% which corresponds to the reference value determined in the KgM study in Liess et al., 2021, same is used in the online tool indicate
+df_SPEARpesticide$SPEARpesticide_norm <-df_SPEARpesticide$SPEARpesticide*100/44
+
+#separate the uniqueID-label
+df_SPEARpesticide<-separate(df_SPEARpesticide,col = "uniqueID",into = c("stream","site_type","date_MI_sampling"),sep="_",remove = FALSE)
+```
+
+### 2.5.3 Statistics
+```{r}
+#statistics for the following data frame
+df_statistics<-df_SPEARpesticide
+#change variables to factor
+df_statistics$site_type  	<- factor(df_statistics$site_type) 
+df_statistics$stream  	<- factor(df_statistics$stream)
+```
+
+a) Data exploration
+```{r}
+#outlier
+outlier_values <- boxplot.stats(df_statistics$SPEARpesticide_norm)$out  # outlier values.
+boxplot(df_statistics$SPEARpesticide_norm, main="outliers", boxwex=0.1)
+mtext(paste("Outliers: ", paste(outlier_values, collapse=", ")), cex=0.6)
+#variance homogeneity
+p_vh<-beanplot(SPEARpesticide_norm~site_type, data=df_statistics)
+leveneTest(SPEARpesticide_norm~site_type, data=df_statistics)
+#normal distribution
+hist(df_statistics$SPEARpesticide_norm)
+shapiro.test(df_statistics$SPEARpesticide_norm)
+```
+Data are reasonably normally distributed, variances homogeneous and there are no problematic outliers.
+
+b) Model
+```{r}
+#linear mixed model
+lmm_spear <- lmer(SPEARpesticide_norm ~ site_type + (1|stream), data = df_statistics,REML = T)
+lmm<-lmm_spear
+```
+
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)#fine
+check_homogeneity(lmm) #fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))#fine
+check_normality(lmm) #fine
+#Cook's distance values
+plot(cooks.distance(lmm),ylab="Cook distance values")
+#general model check
+check_singularity(lmm) #fine
+check_convergence(lmm) #fine
+```
+Model is valid.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+model_performance(lmm) # R2 cond. indicates that random factors describes some variance
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is significant, no predictor can be droped
+#posthoc - more conservative --> used for main manuscript
+emmeans(lmm, list(pairwise ~ site_type), adjust = "tukey")
+```
+
+Conclusion for all community metrics: Taxonomic richness and total abundance were similar across site types (LMM, factor site type not significant at p = 0.35 and p = 0.66 for richness and abundance, respectively; Table SI 9,10). We found strong evidence that the abundance of pesticide-sensitive taxa in terms of SPEARpesticide values differed across site types (Fig. 3 D, LMM, factor site type significant at p = 0.005; Table SI 9,10) with significantly lower values in agricultural sites compared with edge and refuge sites (pairwise differences of site type: agriculture - refuge: p = 0.006, agriculture - edge: p = 0.016, edge - refuge: p = 0.838).
+
+### 2.5.4 Figure 3D - SPEARpesticides
+```{r}
+#plot
+fig_3_D <- 
+  ggplot(df_SPEARpesticide, mapping=aes(x =factor(site_type,level=c("refuge","edge","agriculture")), y =SPEARpesticide_norm , fill = site_type)) +
+  geom_violin(trim = FALSE, alpha=0.1)+
+  geom_line(aes(group=stream), size=1.3, alpha=0.15)+
+  geom_point(mapping=aes(colour=site_type),alpha=1,size=2.5)+ 
+  stat_summary(fun.y = median, geom = "point", size = 4,pch=151,stroke=4,show.legend = F)+
+      labs(title="",x="Site type", y = expression(SPEAR["pesticides"])) +
+   stat_summary(fun.y = mean, geom = "point",  size = 3, show.legend = F)+ #shape = 23,
+  scale_y_continuous(limits = c(0, 1))+
+  scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  scale_x_discrete(name="Site type", breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        legend.position="none",
+        plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+fig_3_D
+```
+
+
+## 2.6 sumTU vs SPEARpesticides
+We additionally modeled SPEARpesticides as response variable explained by sumTU and site type using a LMM with stream as random factor to evaluate the relationship between the fraction of pesticide-sensitive species and estimated mixture toxicity.
+
+### 2.6.1 Prepare data
+```{r}
+#read output data from own TU calculation
+dfsumTU_june <- sumTU_1
+#create merging label in sumTU and SPEAR dataframes
+dfsumTU_june<-dfsumTU_june%>%unite("mergeID",c("stream","site_type"),sep="_",remove = TRUE)
+df_SPEARpesticide<-df_SPEARpesticide%>%unite("mergeID",c("stream","site_type"),sep="_",remove = F)
+#remove uniqueID column
+dfsumTU_june<-dfsumTU_june %>% dplyr:: select(-c("uniqueID"))
+```
+
+```{r}
+#merge sumTU and SPEAR
+t1<-merge(df_SPEARpesticide,dfsumTU_june, by="mergeID")
+##House keeping
+t1$site_type  	<- factor(t1$site_type) 
+t1$stream  	<- factor(t1$stream)
+```
+
+### 2.6.2 Statistics
+
+b) Model
+```{r}
+# #linear mixed model
+lmm_spear_TU <- lmer(SPEARpesticide_norm ~ sumTU_iv+site_type+ (1|stream), data = t1,REML = T)
+lmm<-lmm_spear_TU
+```
+
+c) Model diagnosis
+```{r}
+#resid vs fitted values (homogeneity of variances & linear relationship)
+plot(lmm)#fine
+#qqplot (normal distribution of error, standardized residuals)
+qqnorm(resid(lmm, type = "pearson"))
+qqline(resid(lmm, type = "pearson"))#fine
+check_normality(lmm) #fine
+#Cook's distance values
+plot(cooks.distance(lmm),ylab="Cook distance values")
+#general model check
+check_singularity(lmm) #fine
+check_convergence(lmm) #fine
+#model validation with the DHARMa package
+m1_simres<-simulateResiduals(lmm_spear_TU)
+plot(m1_simres)
+```
+Model is valid.
+
+d) Model output
+```{r}
+summary(lmm)
+# create a nice output
+tab_model(lmm,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+model_performance(lmm) # R2 cond. indicates that random factor describes some variance
+#significance of effects
+#F statistics to test fixed effects, Kenward-Roger Approximation is used, it performs well in the range of small sample settings ( see: Kenward MG, Roger JH. Small sample inference for fixed effects from restricted maximum likelihood. Biometrics. 1997 Sep;53(3):983-97. PMID: 9333350.)
+anova(lmm,ddf="Kenward-Roger")#site_type is significant, no predictor can be droped
+```
+Conclusion: Site type described a significant amount of variation in the SPEARpesticide values (LMM, factor site type significant at p = 0.04; Table SI 9,10), whereas sumTU did not (LMM, factor sumTU not significant at p = 0.86).
+
+### 2.6.3 Figure 4 
+Since the interaction term is not significant, the best model does not include the interaction term. The statistics in the main manuscript are presented for the best model. The graphical representation is for the model with the interaction term to illustrate the slopes of the relationship between SPEAR and sumTU. 
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+#recalculation model with interaction
+lmm_spear_TU_inter <- lmer(SPEARpesticide_norm ~ sumTU_iv*site_type+ (1|stream), data = t1,REML = T)
+
+#extract effects
+ee <- Effect(c("sumTU_iv","site_type"),lmm_spear_TU_inter)
+df_ee<- as.data.frame(ee)
+#restrict values to corresponding gradient, remove rest
+df_ee[c(1:2,10,15),c(3:6)]<-NA
+#plot LMM with interaction
+Fig_4_LMM<-ggplot(df_ee,aes(sumTU_iv,fit,colour=site_type,fill=site_type))+
+    geom_line(size=1.1)+
+    geom_ribbon(colour=NA,alpha=0.05,aes(ymin=lower,ymax=upper))+
+        geom_rug(data=ee$data,aes(y=NULL),sides="b")+
+  geom_vline(xintercept=-3, linetype="dashed", color = "red",size=0.6)+
+  geom_vline(xintercept=-4, linetype="dashed", color = "orange",size=0.6)+
+  geom_point(data =t1, aes(x =sumTU_iv, y =SPEARpesticide_norm ,order=factor(site_type,level=c("refuge","edge","agriculture")),colour=site_type, fill=site_type),alpha=1,size=2.5)+
+  scale_colour_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+    scale_fill_manual(values=group.color,name="Site type",breaks = c("refuge","edge","agriculture"), labels=c("Refuge","Edge","Agriculture"))+
+  labs(title="",x="sumTU", y = expression(SPEAR["pesticides"]) ) +
+ theme(axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour="black",size=14),
+        axis.title.y = element_text(colour="black",size=14),
+        axis.text.x = element_text(colour="black", size=12),
+        axis.ticks.x = element_line(colour = "black"),
+        axis.text.y = element_text(colour="black", size=12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        #legend.position="none",
+        legend.title = element_text(colour="black", size=13),
+        legend.text = element_text(colour="black", size=12),
+        panel.background = element_blank())
+        #plot.title = element_text(hjust = 0, vjust = 0, size = 12, face="bold"))
+Fig_4_LMM
+# #save fig_SI_4
+svg(filename="20220412_Figure_4.svg",  width=6, height=5, pointsize=8)
+Fig_4_LMM
+dev.off()
+ggsave(filename = "20220412_Figure_4.eps",Fig_4_LMM, width=6, height=5, pointsize=8,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+```
+
+
+## 2.7 Present results gathered
+### 2.7.1 Descriptive statistics gathered in one table (Table SI 6,7,8)
+a) Calculate summary statistics
+```{r echo=FALSE, warning=TRUE}
+#prepare pesticide exposure data
+#Calculate maxTU
+maxTU <- ddply(tox_iv, c("uniqueID"), summarise, maxTU_iv = max(TU_iv))
+#create uniqueID for merging
+no_psm_table<-unite(data = no_psm ,col = "uniqueID", c("stream","site_type","date_pesticide_sampling"),sep="_",remove = TRUE)
+sumconc_sample_table<-unite(data = sumconc_sample ,col = "uniqueID", c("stream","site_type","date_pesticide_sampling"),sep="_",remove = TRUE)
+#change unit to ng/L, otherwise too many digits for a nice table
+sumconc_sample_table$sumconc<-sumconc_sample_table$sumconc*1000
+#merge all df of interest
+df_gathered<-merge(sumTU_iv_RP_2019,merge(maxTU,merge(no_psm_table,sumconc_sample_table, by="uniqueID"), by="uniqueID"), by="uniqueID")
+#from wide to long format
+df_gathered_long<-gather(df_gathered,"parameter","value",2:5)
+#separate the uniqueID-label
+df_gathered_long<-separate(data = df_gathered_long ,col = "uniqueID",into = c("stream","site_type","date_pesticide_sampling"),sep="_",remove = FALSE)
+#filter for June
+df_gathered_long_sub<-df_gathered_long[df_gathered_long$date_pesticide_sampling == "20190611"|df_gathered_long$date_pesticide_sampling == "20190612",]
+df_gathered_long_sub<-df_gathered_long_sub %>% dplyr::select(-c("uniqueID","date_pesticide_sampling"))
+#prepare community data
+df_SPEARpesticide_sel<-df_SPEARpesticide[,c("stream","site_type","SPEARpesticide_norm")]
+df_SPEARpesticide_long<-gather(df_SPEARpesticide_sel,"parameter","value",3)
+df_jaccard_long_long<-gather(df_jaccard_long,"parameter","value",3)
+df_richness_long_long<-gather(richness_long,"parameter","value",3)
+df_abundance_long_long<-gather(av_abundance_long,"parameter","value",3)
+#bind pesticide exposure data and community data together
+df_final<-rbind(df_gathered_long_sub,df_richness_long_long,df_abundance_long_long,df_jaccard_long_long,df_SPEARpesticide_long)
+#calculate summary statistics
+df_summary<-summaryBy(value ~ parameter+site_type, data = df_final,
+   FUN = function(x) { c(min=min(x),max=max(x),median=median(x),mean=mean(x),sd=sd(x)) } )
+df_june_summary<-df_summary
+#round values
+df_june_summary[1:3,3:7]<-round2(df_june_summary[1:3,3:7],digits = 0)
+df_june_summary[4:9,3:7]<-round2(df_june_summary[4:9,3:7],digits = 2)
+df_june_summary[10:15,3:4]<-round2(df_june_summary[10:15,3:4],digits = 0)
+df_june_summary[10:15,5:7]<-round2(df_june_summary[10:15,5:7],digits = 2)
+df_june_summary[16:24,3:7]<-round2(df_june_summary[16:24,3:7],digits = 2)
+```
+
+b) Create an overview table
+```{r}
+#nice table output
+#renaming
+names(df_june_summary)[names(df_june_summary) == "value.min"] <- "Minimum"
+names(df_june_summary)[names(df_june_summary) == "value.max"] <- "Maximum"
+names(df_june_summary)[names(df_june_summary) == "value.median"] <- "Median"
+names(df_june_summary)[names(df_june_summary) == "value.mean"] <- "Mean"
+names(df_june_summary)[names(df_june_summary) == "value.sd"] <- "SD"
+names(df_june_summary)[names(df_june_summary) == "site_type"] <- "site_type"
+names(df_june_summary)[names(df_june_summary) == "parameter"] <- "Variable"
+df_june_summary$site_type<- gsub("agriculture", "Agriculture", df_june_summary$site_type,fixed = TRUE)
+df_june_summary$site_type<- gsub("refuge", "Refuge", df_june_summary$site_type,fixed = TRUE)
+df_june_summary$site_type<- gsub("edge", "Edge", df_june_summary$site_type,fixed = TRUE)
+df_june_summary$Variable<- gsub("nb_detected", "Number of detected compounds", df_june_summary$Variable,fixed = TRUE)
+df_june_summary$Variable<- gsub("sumconc", "Total concentration [ng/L]", df_june_summary$Variable,fixed = TRUE)
+df_june_summary$Variable<- gsub("sumTU_iv", "SumTU freshwater invertebrates", df_june_summary$Variable,fixed = TRUE)
+df_june_summary$Variable<- gsub("maxTU_iv", "MaxTU freshwater invertebrates", df_june_summary$Variable,fixed = TRUE)
+df_june_summary$Variable<- gsub("SPEARpesticide_norm", "SPEARpesticides", df_june_summary$Variable,fixed = TRUE)#expression(SPEAR["pesticide"]
+df_june_summary$Variable<- gsub("jaccard", "Jaccard index", df_june_summary$Variable,fixed = TRUE)
+df_june_summary$Variable<- gsub("av_abundance", "Total abundance [individuals/m²]", df_june_summary$Variable,fixed = TRUE)#ATTENTION: eventually m^2 misrepresentation as m?
+df_june_summary$Variable<- gsub("richness", "Taxonomic richness [nr of taxa]", df_june_summary$Variable,fixed = TRUE)
+#change order for nice table
+target2 <- c("Refuge","Edge","Agriculture")#tibble(Variable =
+df<-df_june_summary %>% arrange(factor(site_type, levels = target2))
+target <- c("Number of detected compounds","Total concentration [ng/L]","SumTU freshwater invertebrates","MaxTU freshwater invertebrates","Taxonomic richness [nr of taxa]","Total abundance [individuals/m²]","Jaccard index", "SPEARpesticides")
+df<-df %>% arrange(factor(Variable, levels = target))
+#renaming
+names(df)[names(df) == "Variable"] <- "Variable [unit]"
+names(df)[names(df) == "site_type"] <- "Site type"
+#create nice table
+kable_out<-df%>%
+  kbl(align="llccccc") %>%
+  kable_classic(full_width = F) %>%
+  column_spec(1:7,background = "white") %>%
+  row_spec(0,bold = T,background = "white") %>%
+  column_spec(1,bold = T) %>%
+  collapse_rows(columns = 1,valign = "top")
+#save as html
+readr::write_file(kable_out, "20220412_Table_SI_8_descriptive_stat.html")
+```
+
+c) Table SI 6 and 7
+```{r}
+#save Table_SI_6_site_specific_data_pesticide_exposure_and_community_metrics
+#Jaccard extra
+Table_SI_6<-df_final[!df_final$parameter=="jaccard",]
+Table_SI_7<-df_final[df_final$parameter=="jaccard",]
+#with jaccard
+Table_SI_7<-reshape2::dcast(Table_SI_7,stream+site_type~parameter,value.var = "value")
+names(Table_SI_7)[names(Table_SI_7) == "stream"] <- "Stream"
+names(Table_SI_7)[names(Table_SI_7) == "site_type"] <- "Site type"
+names(Table_SI_7)[names(Table_SI_7) == "jaccard"] <- "Jaccard index"
+Table_SI_7[,3]<-round2(Table_SI_7[,3],digits = 2)
+# save results
+write.csv(Table_SI_7, "20220412_Table_SI_7_site_specific_data_exposure&community_metrics_june.csv", row.names = FALSE)
+#without jaccard
+Table_SI_6<-reshape2::dcast(Table_SI_6,stream+site_type~parameter,value.var = "value")
+names(Table_SI_6)[names(Table_SI_6) == "stream"] <- "Stream"
+names(Table_SI_6)[names(Table_SI_6) == "site_type"] <- "Site type"
+names(Table_SI_6)[names(Table_SI_6) == "nb_detected"] <- "Number of detected pesticides"
+names(Table_SI_6)[names(Table_SI_6) == "av_abundance"] <- "Total abundance [individuals/m2]"
+names(Table_SI_6)[names(Table_SI_6) == "richness"] <- "Taxonomic richness [nr of taxa]"
+names(Table_SI_6)[names(Table_SI_6) == "sumconc"] <- "Total concentration [ng/L]"
+names(Table_SI_6)[names(Table_SI_6) == "SPEARpesticide_norm"] <- "SPEARpesticides"
+names(Table_SI_6)[names(Table_SI_6) == "sumTU_iv"] <- "SumTU freshwater invertebrates"
+names(Table_SI_6)[names(Table_SI_6) == "maxTU_iv"] <- "MaxTU freshwater invertebrates"
+#order columns new, first june, then rest
+Table_SI_6<- Table_SI_6[, c(1,2,5,8,9,4,6,3,7)]
+
+Table_SI_6[,c(4:6,9)]<-round2(Table_SI_6[,c(4:6,9)],digits = 2)
+Table_SI_6[,8]<-round2(Table_SI_6[,8],digits = 0)
+# save results
+write.csv(Table_SI_6, "20220412_Table_SI_6_site_specific_data_exposure&community_metrics_june.csv", row.names = FALSE)
+```
+
+
+### 2.7.2 Inferential statistics gathered in one table (Table SI 9)
+```{r}
+#nice statistic output
+tab_model(lmm_av_abundance,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+tab_model(lmm_TUsum,lmm_richness,lmm_richness,lmm_jaccard,lmm_spear,lmm_spear_TU,show.ci = F, show.se = TRUE,  string.se = "SE", p.val = "kr")
+```
+
+### 2.7.3 Figures gathered (Main Manuscript Figure 2 and Figure 3, and Figure SI 12)
+
+```{r}
+#save Figure 2
+figure_2<-ggarrange(fig_2_A,fig_2_B,fig_2_C,nrow = 1,labels = c("A","B", "C"))
+svg(filename="20220412_Figure_2.svg",  width=12, height=4, pointsize=15)
+figure_2
+dev.off()
+ggsave(filename = "20220412_Figure_2.eps",figure_2, width=12, height=4, pointsize=15,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+dev.off()
+```
+
+```{r}
+#save Figure 3
+figure_3<-ggarrange(fig_3_A, fig_3_B,fig_3_C,fig_3_D,ncol = 2,  nrow = 2, align = "v", labels = c("A","B","C","D"))
+svg(filename="20220412_Figure_3.svg",  width=8, height=7, pointsize=15)
+figure_3
+dev.off()
+ggsave(filename = "20220412_Figure_3.eps",figure_3, width=8, height=7, pointsize=15,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+dev.off()
+```
+
+```{r}
+figure_SI_12<-ggarrange(fig_SI_12_A,fig_SI_12_B,fig_SI_12_C,nrow = 1,labels = c("A","B", "C"), common.legend = T, legend = "bottom")#figure_types<-
+
+#save Figure 2
+svg(filename="20220412_Figure_SI_12.svg",  width=12, height=4, pointsize=15)
+figure_SI_12
+dev.off()
+ggsave(filename = "20220412_Figure_SI_12.eps",figure_SI_12, width=12, height=4, pointsize=15,dpi = 300,device=cairo_ps, fallback_resolution = 600)
+dev.off()
+```
+
+

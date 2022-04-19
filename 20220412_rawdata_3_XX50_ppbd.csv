@@ -1,0 +1,26 @@
+CAS;cname;sign;EC50_ug_L;tax_taxon;reference
+74070465;aclonifen;;1200;Daphnia magna;ppdb
+581809463;bixafen;;1200;Daphnia magna;ppdb
+1698608;chloridazon;;132000;Daphnia magna;ppdb
+15165670;dichlorprop_p;;100000;Daphnia magna;ppdb
+83164334;diflufenican;>;240;Daphnia magna;ppdb
+110488705;dimethomorph;>;20100;Daphnia magna;ppdb
+149961524;dimoxystrobin;;39.4;Daphnia magna;ppdb
+145701231;florasulam;>;292000;Daphnia magna;ppdb
+907204313;fluxapyroxad;;6780;Daphnia magna;ppdb
+34123596;isoproturon;;580;Daphnia magna;ppdb
+2164081;lenacil;;8400;Daphnia magna;ppdb
+94746;mcpa;>;190000;Daphnia magna;ppdb
+16484778;mecoprop_p;>;91000;Daphnia magna;ppdb
+41394052;metamitron;;5700;Daphnia magna;ppdb
+67129082;metazachlor;;33000;Daphnia magna;ppdb
+220899036;metrafenone;>;920;Daphnia magna;ppdb
+111991094;nicosulfuron;;90000;Daphnia magna;ppdb
+24579735;propamocarb;;106000;Daphnia magna;ppdb
+23950585;propyzamid;>;5600;Daphnia magna;ppdb
+52888809;prosulfocarb;;510;Daphnia magna;ppdb
+94125345;prosulfuron;>;120000;Daphnia magna;ppdb
+422556089;pyroxsulam;;100000;Chironomus riparius;ppdb
+90717036;quinmerac;>;100000;Daphnia magna;ppdb
+210631688;topramezone;>;100000;Daphnia magna;ppdb
+142469145;tritosulfuron;>;100000;Daphnia magna;ppdb
