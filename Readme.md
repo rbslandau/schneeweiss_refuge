@@ -1,6 +1,6 @@
 ## Repo for the publication: Potential propagation of agricultural pesticide exposure and effects to upstream sections in a biosphere reserve
 
-This repo contains the R code and data for the related manuscript submitted for publication in Science of the total environment 
+This repo contains the R code and data for the related manuscript published in [Science of the total environment](http://dx.doi.org/10.1016/j.scitotenv.2022.155688)
 
 Written by Anke Schneeweiss, revised by Verena C. Schreiner
 
